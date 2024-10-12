@@ -2,19 +2,13 @@
 
 #include "CameraHandInput.h"
 
-#include "OculusInputFunctionLibrary.h"
+#include "OculusXRInputFunctionLibrary.h"
 #include "Components/PoseableMeshComponent.h"
 #include "HandPose.h"
 #include "QuatUtil.h"
 
-#if WITH_OCULUS_ENGINE
-#define ConvertBoneToFinger UOculusInputFunctionLibrary::ConvertBoneToFinger
-#define GetFingerTrackingConfidence UOculusInputFunctionLibrary::GetFingerTrackingConfidence
-#else
-#define ConvertBoneToFinger
-#define GetFingerTrackingConfidence(a,b) (ETrackingConfidence::High)
-#define EOculusFinger int
-#endif
+#define ConvertBoneToFinger UOculusXRInputFunctionLibrary::ConvertBoneToFinger
+#define GetFingerTrackingConfidence UOculusXRInputFunctionLibrary::GetFingerTrackingConfidence
 
 UCameraHandInput::UCameraHandInput(FObjectInitializer const& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -44,19 +38,25 @@ void UCameraHandInput::BeginPlay()
 
 void UCameraHandInput::SetHand(EControllerHand InHand)
 {
-	Hand = InHand == EControllerHand::Left ? EOculusHandType::HandLeft : EOculusHandType::HandRight;
+	Hand = InHand == EControllerHand::Left ? EOculusXRHandType::HandLeft : EOculusXRHandType::HandRight;
 }
 
 void UCameraHandInput::SetUpBoneMap(UPoseableMeshComponent* HandMesh, TArray<FHandBoneMapping>& BoneMap)
 {
-	if (HandMesh == nullptr || HandMesh->SkeletalMesh == nullptr)
+	if (HandMesh == nullptr)
 		return;
+
+	auto SkinnedAsset = HandMesh->GetSkinnedAsset();
+	if (SkinnedAsset == nullptr)
+		return;
+
+	auto& RefSkeleton = SkinnedAsset->GetRefSkeleton();
 	
 	// set the bone ids for fast lookup
 	for (auto& BoneMapping : BoneMap)
 	{
 		auto BoneName = BoneMapping.BoneName;
-		auto const BoneIndex = HandMesh->SkeletalMesh->RefSkeleton.FindBoneIndex(BoneName);
+		auto const BoneIndex = RefSkeleton.FindBoneIndex(BoneName);
 		BoneMapping.BoneId = BoneIndex;
 
 		if (BoneIndex < 0)
@@ -66,7 +66,7 @@ void UCameraHandInput::SetUpBoneMap(UPoseableMeshComponent* HandMesh, TArray<FHa
 		}
 		else
 		{
-			BoneMapping.ReferenceTransform = HandMesh->SkeletalMesh->RefSkeleton.GetRefBonePose()[BoneIndex];
+			BoneMapping.ReferenceTransform = RefSkeleton.GetRefBonePose()[BoneIndex];
 		}
 	}
 }
@@ -76,18 +76,18 @@ void UCameraHandInput::SetPoseableMeshComponent(UPoseableMeshComponent* Poseable
 	HandMesh = PoseableMeshComponent;
 	UpdateMeshVisibility();
 
-	if (ensureMsgf(HandMesh, TEXT("SetPoseableMeshComponent failed")) && ensureMsgf(HandMesh->SkeletalMesh,
+	if (ensureMsgf(HandMesh, TEXT("SetPoseableMeshComponent failed")) && ensureMsgf(HandMesh->GetSkinnedAsset(),
 		TEXT("SetPoseableMeshComponent failed")))
 	{
 		SetUpBoneMap(HandMesh, BoneMap);
-		GripBoneId = HandMesh->SkeletalMesh->RefSkeleton.FindBoneIndex(GripBoneName);
+		GripBoneId = HandMesh->GetSkinnedAsset()->GetRefSkeleton().FindBoneIndex(GripBoneName);
 		OnInitializeMesh.Broadcast(this);
 	}
 }
 
 void UCameraHandInput::SetupInput(UInputComponent* Input)
 {
-	if (Hand == EOculusHandType::HandLeft)
+	if (Hand == EOculusXRHandType::HandLeft)
 	{
 		Input->BindAxisKey("OculusHand_Left_IndexPinchStrength", this, &UCameraHandInput::IndexFingerPinchUpdate);
 		Input->BindAxisKey("OculusHand_Left_MiddlePinchStrength", this, &UCameraHandInput::MiddleFingerPinchUpdate);
@@ -107,7 +107,7 @@ void UCameraHandInput::SetupInput(UInputComponent* Input)
 
 bool UCameraHandInput::IsActive()
 {
-	return UOculusInputFunctionLibrary::IsHandTrackingEnabled();
+	return UOculusXRInputFunctionLibrary::IsHandTrackingEnabled();
 }
 
 void UCameraHandInput::TickComponent(float DeltaTime, ELevelTick TickType,
@@ -174,10 +174,10 @@ void UCameraHandInput::UpdateTracking()
 
 bool UCameraHandInput::IsTracked() const
 {
-	return UOculusInputFunctionLibrary::GetTrackingConfidence(Hand) == ETrackingConfidence::High;
+	return UOculusXRInputFunctionLibrary::GetTrackingConfidence(Hand) == EOculusXRTrackingConfidence::High;
 }
 
-void UCameraHandInput::FilterBoneRotation(EBone Bone, FQuat LastRotation, FQuat& Rotation)
+void UCameraHandInput::FilterBoneRotation(EOculusXRBone Bone, FQuat LastRotation, FQuat& Rotation)
 {
 	auto const Now = GetWorld()->GetTimeSeconds();
 	auto& LastFrozenTime = BoneLastFrozenTimes[Bone];
@@ -199,7 +199,7 @@ void UCameraHandInput::FilterBoneRotation(EBone Bone, FQuat LastRotation, FQuat&
 		Rotation = FQuat::Slerp(LastRotation, Rotation, Alpha);
 	}
 
-	if (bAlwaysClampBoneSpeed || GetFingerTrackingConfidence(Hand, Finger) != ETrackingConfidence::High)
+	if (bAlwaysClampBoneSpeed || GetFingerTrackingConfidence(Hand, Finger) != EOculusXRTrackingConfidence::High)
 	{
 		auto const DeltaSeconds = GetWorld()->GetDeltaSeconds();
 		auto const AngularDistance = LastRotation.AngularDistance(Rotation);
@@ -231,7 +231,7 @@ void UCameraHandInput::SetBoneRotation(UPoseableMeshComponent* HandMesh, FHandBo
 		BoneMapping.ReferenceTransform.GetTranslation(),
 		BoneMapping.ReferenceTransform.GetScale3D());
 
-	if (BoneMapping.MappedBone == EBone::Wrist_Root)
+	if (BoneMapping.MappedBone == EOculusXRBone::Wrist_Root)
 	{
 		HandMesh->BoneSpaceTransforms[BoneMapping.BoneId].SetLocation(FVector::ZeroVector);
 	}
@@ -254,7 +254,7 @@ void UCameraHandInput::UpdateSkeleton()
 	else if (bHadCustomGestureLastFrame)
 	{
 		// reset the grip bone
-		auto&& Pose = HandMesh->SkeletalMesh->RefSkeleton.GetRefBonePose();
+		auto&& Pose = HandMesh->GetSkinnedAsset()->GetRefSkeleton().GetRefBonePose();
 		if (ensureMsgf(Pose.IsValidIndex(GripBoneId), TEXT("GripBoneId is %i"), GripBoneId))
 		{
 			HandMesh->BoneSpaceTransforms[GripBoneId] = Pose[GripBoneId];
@@ -265,10 +265,10 @@ void UCameraHandInput::UpdateSkeleton()
 	if (bHasCustomGestureThisFrame && DigitsMaskedFromCustomGesture == 0)
 	{
 		// get the bone rotations anyway, since we need them for gesture detection (eg. dropping)
-		for (auto Index = 0; Index != static_cast<int>(EBone::Bone_Max); Index += 1)
+		for (auto Index = 0; Index != static_cast<int>(EOculusXRBone::Bone_Max); Index += 1)
 		{
-			auto const Bone = static_cast<EBone>(Index);
-			auto const Rotation = UOculusInputFunctionLibrary::GetBoneRotation(Hand, Bone);
+			auto const Bone = static_cast<EOculusXRBone>(Index);
+			auto const Rotation = UOculusXRInputFunctionLibrary::GetBoneRotation(Hand, Bone);
 			RawLocalSpaceRotations[Bone] = Rotation;
 		}
 
@@ -276,11 +276,11 @@ void UCameraHandInput::UpdateSkeleton()
 	}
 
 	// Update finger rotations
-	for (auto Index = 0; Index != static_cast<int>(EBone::Bone_Max); Index += 1)
+	for (auto Index = 0; Index != static_cast<int>(EOculusXRBone::Bone_Max); Index += 1)
 	{
-		auto const Bone = static_cast<EBone>(Index);
+		auto const Bone = static_cast<EOculusXRBone>(Index);
 		auto& LastRotation = BoneRotations[Bone];
-		auto Rotation = UOculusInputFunctionLibrary::GetBoneRotation(Hand, Bone);
+		auto Rotation = UOculusXRInputFunctionLibrary::GetBoneRotation(Hand, Bone);
 		RawLocalSpaceRotations[Bone] = Rotation;
 		if (bBoneRotationFilteringEnabled)
 		{
@@ -315,7 +315,7 @@ void UCameraHandInput::UpdateSkeleton()
 
 	if (bDynamicScalingEnabled)
 	{
-		auto const Scale = UOculusInputFunctionLibrary::GetHandScale(Hand);
+		auto const Scale = UOculusXRInputFunctionLibrary::GetHandScale(Hand);
 		HandMesh->SetRelativeScale3D(FVector(Scale));
 	}
 }
@@ -375,14 +375,14 @@ void UCameraHandInput::FingerPinchUpdate(int FingerIndex, float Value)
 		return;
 	}
 
-	if (GetFingerTrackingConfidence(Hand, EOculusFinger::Thumb) ==
-		ETrackingConfidence::Low)
+	if (GetFingerTrackingConfidence(Hand, EOculusXRFinger::Thumb) ==
+		EOculusXRTrackingConfidence::Low)
 	{
 		return;
 	}
 
-	auto const OculusFinger = static_cast<EOculusFinger>(FingerIndex + 1);
-	if (GetFingerTrackingConfidence(Hand, OculusFinger) == ETrackingConfidence::Low)
+	auto const OculusFinger = static_cast<EOculusXRFinger>(FingerIndex + 1);
+	if (GetFingerTrackingConfidence(Hand, OculusFinger) == EOculusXRTrackingConfidence::Low)
 	{
 		return;
 	}
@@ -409,7 +409,7 @@ FTransform UCameraHandInput::GetGripBoneTransform(EBoneSpaces::Type BoneSpace)
 	return FTransform::Identity;
 }
 
-EOculusHandType UCameraHandInput::GetHand() const
+EOculusXRHandType UCameraHandInput::GetHand() const
 {
 	return Hand;
 }
@@ -446,9 +446,9 @@ void UCameraHandInput::UpdateMeshVisibility() const
 float UCameraHandInput::GetPointingAxis()
 {
 	auto const SummedJoints =
-		RawLocalSpaceRotations[EBone::Index_1].GetNormalized().GetAngle() +
-		RawLocalSpaceRotations[EBone::Index_2].GetNormalized().GetAngle() +
-		RawLocalSpaceRotations[EBone::Index_3].GetNormalized().GetAngle();
+		RawLocalSpaceRotations[EOculusXRBone::Index_1].GetNormalized().GetAngle() +
+		RawLocalSpaceRotations[EOculusXRBone::Index_2].GetNormalized().GetAngle() +
+		RawLocalSpaceRotations[EOculusXRBone::Index_3].GetNormalized().GetAngle();
 
 	return FMath::GetMappedRangeValueClamped(PointingAxisJointRotationRange, FVector2D(0.f, 1.f), SummedJoints);
 }
@@ -456,15 +456,15 @@ float UCameraHandInput::GetPointingAxis()
 float UCameraHandInput::GetGrippingAxis()
 {
 	auto const SummedJoints =
-		RawLocalSpaceRotations[EBone::Middle_1].GetNormalized().GetAngle() +
-		RawLocalSpaceRotations[EBone::Middle_2].GetNormalized().GetAngle() +
-		RawLocalSpaceRotations[EBone::Middle_3].GetNormalized().GetAngle() +
-		RawLocalSpaceRotations[EBone::Ring_1].GetNormalized().GetAngle() +
-		RawLocalSpaceRotations[EBone::Ring_2].GetNormalized().GetAngle() +
-		RawLocalSpaceRotations[EBone::Ring_3].GetNormalized().GetAngle() +
-		RawLocalSpaceRotations[EBone::Pinky_1].GetNormalized().GetAngle() +
-		RawLocalSpaceRotations[EBone::Pinky_2].GetNormalized().GetAngle() +
-		RawLocalSpaceRotations[EBone::Pinky_3].GetNormalized().GetAngle();
+		RawLocalSpaceRotations[EOculusXRBone::Middle_1].GetNormalized().GetAngle() +
+		RawLocalSpaceRotations[EOculusXRBone::Middle_2].GetNormalized().GetAngle() +
+		RawLocalSpaceRotations[EOculusXRBone::Middle_3].GetNormalized().GetAngle() +
+		RawLocalSpaceRotations[EOculusXRBone::Ring_1].GetNormalized().GetAngle() +
+		RawLocalSpaceRotations[EOculusXRBone::Ring_2].GetNormalized().GetAngle() +
+		RawLocalSpaceRotations[EOculusXRBone::Ring_3].GetNormalized().GetAngle() +
+		RawLocalSpaceRotations[EOculusXRBone::Pinky_1].GetNormalized().GetAngle() +
+		RawLocalSpaceRotations[EOculusXRBone::Pinky_2].GetNormalized().GetAngle() +
+		RawLocalSpaceRotations[EOculusXRBone::Pinky_3].GetNormalized().GetAngle();
 
 	return FMath::GetMappedRangeValueClamped(GrippingAxisJointRotationRange, FVector2D(0.f, 1.f), SummedJoints);
 }
@@ -472,10 +472,10 @@ float UCameraHandInput::GetGrippingAxis()
 float UCameraHandInput::GetThumbUpAxis()
 {
 	auto const SummedJoints =
-		RawLocalSpaceRotations[EBone::Thumb_0].GetNormalized().GetAngle() +
-		RawLocalSpaceRotations[EBone::Thumb_1].GetNormalized().GetAngle() +
-		RawLocalSpaceRotations[EBone::Thumb_2].GetNormalized().GetAngle() +
-		RawLocalSpaceRotations[EBone::Thumb_3].GetNormalized().GetAngle();
+		RawLocalSpaceRotations[EOculusXRBone::Thumb_0].GetNormalized().GetAngle() +
+		RawLocalSpaceRotations[EOculusXRBone::Thumb_1].GetNormalized().GetAngle() +
+		RawLocalSpaceRotations[EOculusXRBone::Thumb_2].GetNormalized().GetAngle() +
+		RawLocalSpaceRotations[EOculusXRBone::Thumb_3].GetNormalized().GetAngle();
 
 	return FMath::GetMappedRangeValueClamped(ThumbUpAxisJointRotationRange, FVector2D(0.f, 1.f), SummedJoints);
 }
@@ -484,28 +484,28 @@ bool UCameraHandInput::ApplyPoseToMesh(
 	FString PoseString, UPoseableMeshComponent* HandMesh,
 	TArray<FHandBoneMapping> const& BoneMappings)
 {
-	auto BoneToRecognizedBone = [](EBone Bone)
+	auto BoneToRecognizedBone = [](EOculusXRBone Bone)
 	{
 		switch (Bone)
 		{
-		case EBone::Wrist_Root: return Wrist;
-		case EBone::Thumb_0: return Thumb_0;
-		case EBone::Thumb_1: return Thumb_1;
-		case EBone::Thumb_2: return Thumb_2;
-		case EBone::Thumb_3: return Thumb_3;
-		case EBone::Index_1: return Index_1;
-		case EBone::Index_2: return Index_2;
-		case EBone::Index_3: return Index_3;
-		case EBone::Middle_1: return Middle_1;
-		case EBone::Middle_2: return Middle_2;
-		case EBone::Middle_3: return Middle_3;
-		case EBone::Ring_1: return Ring_1;
-		case EBone::Ring_2: return Ring_2;
-		case EBone::Ring_3: return Ring_3;
-		case EBone::Pinky_0: return Pinky_0;
-		case EBone::Pinky_1: return Pinky_1;
-		case EBone::Pinky_2: return Pinky_2;
-		case EBone::Pinky_3: return Pinky_3;
+		case EOculusXRBone::Wrist_Root: return Wrist;
+		case EOculusXRBone::Thumb_0: return Thumb_0;
+		case EOculusXRBone::Thumb_1: return Thumb_1;
+		case EOculusXRBone::Thumb_2: return Thumb_2;
+		case EOculusXRBone::Thumb_3: return Thumb_3;
+		case EOculusXRBone::Index_1: return Index_1;
+		case EOculusXRBone::Index_2: return Index_2;
+		case EOculusXRBone::Index_3: return Index_3;
+		case EOculusXRBone::Middle_1: return Middle_1;
+		case EOculusXRBone::Middle_2: return Middle_2;
+		case EOculusXRBone::Middle_3: return Middle_3;
+		case EOculusXRBone::Ring_1: return Ring_1;
+		case EOculusXRBone::Ring_2: return Ring_2;
+		case EOculusXRBone::Ring_3: return Ring_3;
+		case EOculusXRBone::Pinky_0: return Pinky_0;
+		case EOculusXRBone::Pinky_1: return Pinky_1;
+		case EOculusXRBone::Pinky_2: return Pinky_2;
+		case EOculusXRBone::Pinky_3: return Pinky_3;
 		default: return static_cast<ERecognizedBone>(-1);
 		}
 	};
@@ -545,6 +545,6 @@ bool UCameraHandInput::SetPose(FString PoseString)
 #undef ConvertBoneToFinger
 #undef GetFingerTrackingConfidence
 
-#ifdef EOculusFinger
-#undef EOculusFinger
+#ifdef EOculusXRFinger
+#undef EOculusXRFinger
 #endif
